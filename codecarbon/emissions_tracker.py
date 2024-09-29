@@ -153,6 +153,7 @@ class BaseEmissionsTracker(ABC):
         log_level: Optional[Union[int, str]] = _sentinel,
         on_csv_write: Optional[str] = _sentinel,
         logger_preamble: Optional[str] = _sentinel,
+        write_interval: Optional[int] = _sentinel,
     ):
         """
         :param project_name: Project name for current experiment run, default name
@@ -196,6 +197,10 @@ class BaseEmissionsTracker(ABC):
                              Accepts one of "append" or "update". Default is "append".
         :param logger_preamble: String to systematically include in the logger.
                                 messages. Defaults to "".
+        :param write_interval: Occurrence to wait before calling flush() to write to file : 
+                            -1 : only call flush() at the end
+                            1 : at every measure
+                            2 : every 2 measure, etc...
         """
 
         # logger.info("base tracker init")
@@ -218,10 +223,14 @@ class BaseEmissionsTracker(ABC):
         self._set_from_conf(tracking_mode, "tracking_mode", "machine")
         self._set_from_conf(on_csv_write, "on_csv_write", "append")
         self._set_from_conf(logger_preamble, "logger_preamble", "")
-
+        self._set_from_conf(logger_preamble, "write_interval", -1, int)
+        
         assert self._tracking_mode in ["machine", "process"]
         set_logger_level(self._log_level)
         set_logger_format(self._logger_preamble)
+        
+        
+        logger.info(f"Writing every {self._write_interval} measurements")
 
         self._start_time: Optional[float] = None
         self._last_measured_time: float = time.time()
@@ -234,6 +243,7 @@ class BaseEmissionsTracker(ABC):
         self._ram_power: Power = Power.from_watts(watts=0)
         self._cc_api__out = None
         self._measure_occurrence: int = 0
+        self._measure_occurrence_2: int = 0
         self._cloud = None
         self._previous_emissions = None
         self._conf["os"] = platform.platform()
@@ -382,8 +392,8 @@ class BaseEmissionsTracker(ABC):
 
         self._scheduler.start()
 
-    @suppress(Exception)
-    def flush(self) -> Optional[float]:
+    # @suppress(Exception)
+    def flush(self, already_measuring=False) -> Optional[float]:
         """
         Write the emissions to disk or call the API depending on the configuration,
         but keep running the experiment.
@@ -395,7 +405,8 @@ class BaseEmissionsTracker(ABC):
 
         # Run to calculate the power used from last
         # scheduled measurement to shutdown
-        self._measure_power_and_energy()
+        if not already_measuring:
+            self._measure_power_and_energy()
 
         emissions_data = self._prepare_emissions_data()
         for persistence in self.persistence_objs:
@@ -522,6 +533,7 @@ class BaseEmissionsTracker(ABC):
         """
         pass
 
+    @suppress(Exception)
     def _measure_power_and_energy(self) -> None:
         """
         A function that is periodically run by the `BackgroundScheduler`
@@ -588,6 +600,12 @@ class BaseEmissionsTracker(ABC):
                 )
                 self._cc_api__out.out(emissions)
                 self._measure_occurrence = 0
+        self._measure_occurrence_2 += 1
+        if self._write_interval != -1:
+            if self._measure_occurrence_2 >= self._write_interval:
+                self.flush(already_measuring=True)
+                self._measure_occurrence_2 = 0
+        
         logger.debug(f"last_duration={last_duration}\n------------------------")
 
     def __enter__(self):
